@@ -1,0 +1,31 @@
+[project]
+name = "facebook-api"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Azure-dvl", email = "subarachisekai@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "playwright>=1.49",
+    "playwright-stealth>=1.0",
+    "cryptography>=44",
+    "qrcode[pil]>=8.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+facebook-api = "facebook_api:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
