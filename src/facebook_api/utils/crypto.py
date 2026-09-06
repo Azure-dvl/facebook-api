@@ -1,4 +1,4 @@
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from facebook_api.config import settings
 
@@ -6,8 +6,20 @@ from facebook_api.config import settings
 def _get_fernet() -> Fernet:
     key = settings.ENCRYPTION_KEY
     if not key:
-        raise ValueError("ENCRYPTION_KEY not set in environment")
-    return Fernet(key.encode() if isinstance(key, str) else key)
+        raise ValueError(
+            "ENCRYPTION_KEY no esta configurada en .env. "
+            "Genera una con: python -c \"from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())\""
+        )
+    try:
+        return Fernet(key.encode() if isinstance(key, str) else key)
+    except (ValueError, TypeError) as e:
+        raise ValueError(
+            "ENCRYPTION_KEY en .env es invalida (debe ser una clave Fernet de 32 "
+            "bytes en base64). Genera una con: "
+            "python -c \"from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())\""
+        ) from e
 
 
 def encrypt_data(data: str) -> str:

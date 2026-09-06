@@ -17,7 +17,13 @@ class Settings(BaseSettings):
 
     ENCRYPTION_KEY: str = ""
 
-    QR_TOKEN_TTL: int = 300
+    QR_TOKEN_TTL: int = 600
+
+    # URL publica bajo la cual se accede a la API (la que va en el QR / link).
+    # Por defecto localhost. Para un servidor remoto configurala con el host/IP
+    # alcanzable (ej: "https://api.midominio.com" o "http://192.168.1.5:8000").
+    # PENSA: si la dejas vacia se usa la ip/host detectada del request.
+    APP_PUBLIC_URL: str = ""
 
     @property
     def DATABASE_URL(self) -> str:
@@ -32,6 +38,12 @@ class Settings(BaseSettings):
             f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
+
+    @property
+    def PUBLIC_BASE_URL(self) -> str:
+        if self.APP_PUBLIC_URL:
+            return self.APP_PUBLIC_URL.rstrip("/")
+        return f"http://localhost:{self.APP_PORT}"
 
 
 settings = Settings()

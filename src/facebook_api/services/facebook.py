@@ -11,39 +11,99 @@ async def random_delay(min_s: float = 2.0, max_s: float = 5.0) -> None:
     await asyncio.sleep(random.uniform(min_s, max_s))
 
 
+async def _safe_close_context(context: BrowserContext) -> None:
+    try:
+        await context.close()
+    except Exception:
+        pass
+
+
+async def _goto_login(page: Page) -> None:
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await page.goto(
+                "https://www.facebook.com/login",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await random_delay(1, 2)
+            return
+        except Exception as e:
+            if attempt >= 2:
+                raise TimeoutError(
+                    f"No se pudo cargar la pagina de login de Facebook: {e}"
+                )
+            await random_delay(2, 3)
+
+
 async def login_facebook(email: str, password: str) -> dict:
     context = await browser_manager.create_context()
     try:
         page = await context.new_page()
-        await page.goto("https://www.facebook.com/login", wait_until="networkidle")
-        await random_delay(1, 2)
+        page.set_default_timeout(30000)
+
+        await _goto_login(page)
 
         email_input = page.locator('input[name="email"]')
-        await email_input.fill(email)
+        try:
+            await email_input.first.wait_for(state="visible", timeout=15000)
+        except Exception:
+            raise Exception("No se renderizo el formulario de login de Facebook")
+        await email_input.first.fill(email)
         await random_delay(0.5, 1)
 
         pass_input = page.locator('input[name="pass"]')
-        await pass_input.fill(password)
+        try:
+            await pass_input.first.wait_for(state="visible", timeout=10000)
+        except Exception:
+            raise Exception("No se renderizo el campo de password")
+        await pass_input.first.fill(password)
         await random_delay(0.5, 1)
 
-        submit_btn = page.locator('button[name="login"]')
-        await submit_btn.click()
+        submit_btn = page.locator('input[type="submit"]')
+        if await submit_btn.count() == 0:
+            submit_btn = page.locator('[role="button"]:has-text("Iniciar sesión")')
+        if await submit_btn.count() == 0:
+            submit_btn = page.locator('[role="button"]:has-text("Log In")')
 
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await random_delay(2, 3)
+        submitted = False
+        if await submit_btn.count() > 0 and await submit_btn.first.is_enabled():
+            try:
+                await submit_btn.first.click(timeout=5000)
+                submitted = True
+            except Exception:
+                submitted = False
+
+        if not submitted:
+            await pass_input.first.press("Enter")
+
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except asyncio.TimeoutError:
+            pass
+
+        await random_delay(3, 5)
 
         current_url = page.url
-        if "checkpoint" in current_url or "login" in current_url:
-            raise Exception("Login failed: checkpoint or still on login page")
+        if "checkpoint" in current_url:
+            raise Exception("Facebook pide verificacion adicional (checkpoint)")
 
         cookies = await context.cookies()
         user_agent = await page.evaluate("navigator.userAgent")
 
         fb_user_id = None
+        has_session = False
         for cookie in cookies:
             if cookie["name"] == "c_user":
                 fb_user_id = cookie["value"]
-                break
+                has_session = True
+
+        if not has_session:
+            raise Exception(
+                "El login no se confirmo: credenciales invalidas o Facebook lo bloqueo"
+            )
 
         return {
             "cookies": cookies,
@@ -51,7 +111,58 @@ async def login_facebook(email: str, password: str) -> dict:
             "fb_user_id": fb_user_id,
         }
     finally:
-        await context.close()
+        await _safe_close_context(context)
+
+
+def _cookies_are_session_cookies(cookies: list[dict]) -> bool:
+    names = {c.get("name") for c in cookies}
+    if "c_user" not in names:
+        return False
+    if not any(k in names for k in ("xs", "datr")):
+        return False
+    return True
+
+
+async def verify_cookies(cookies: list[dict]) -> dict:
+    context = await browser_manager.create_context(cookies=cookies)
+    try:
+        page = context.pages[0]
+        try:
+            await page.goto(
+                "https://www.facebook.com/",
+                wait_until="domcontentloaded",
+                timeout=20000,
+            )
+        except Exception:
+            return {"valid": False, "reason": "Facebook no respondio; la sesion parece invalida"}
+        await random_delay(1, 2)
+
+        fb_user_id = None
+        for cookie in cookies:
+            if cookie.get("name") == "c_user":
+                fb_user_id = cookie["value"]
+                break
+
+        if not fb_user_id:
+            return {"valid": False, "reason": "Falta la cookie c_user"}
+
+        login_form = page.locator('input[name="email"]')
+        login_btn = page.locator('[type="submit"][value*="Iniciar"], [type="submit"][value*="Log"]')
+        try:
+            is_login_page = await login_form.count() > 0
+        except Exception:
+            is_login_page = False
+
+        if "checkpoint" in page.url:
+            return {"valid": False, "reason": "Facebook pide verificacion adicional (checkpoint)"}
+        if is_login_page:
+            return {"valid": False, "reason": "La sesion no es valida: Facebook muestra la pagina de login"}
+
+        return {"valid": True, "fb_user_id": fb_user_id}
+    except Exception as e:
+        return {"valid": False, "reason": str(e)}
+    finally:
+        await _safe_close_context(context)
 
 
 async def _get_authenticated_context(
@@ -99,7 +210,7 @@ async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
 
         return groups
     finally:
-        await context.close()
+        await _safe_close_context(context)
 
 
 async def _scrape_groups_via_search(page: Page) -> list[dict]:
@@ -215,7 +326,7 @@ async def post_to_group(
     except Exception as e:
         return {"status": "failed", "error": str(e)}
     finally:
-        await context.close()
+        await _safe_close_context(context)
 
 
 async def post_to_profile(
@@ -297,4 +408,4 @@ async def post_to_profile(
     except Exception as e:
         return {"status": "failed", "error": str(e)}
     finally:
-        await context.close()
+        await _safe_close_context(context)

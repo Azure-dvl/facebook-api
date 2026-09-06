@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,11 +9,16 @@ from facebook_api.database import init_db
 from facebook_api.routers import auth, groups, posts
 from facebook_api.utils.browser import browser_manager
 
+logger = logging.getLogger("facebook-api")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await browser_manager.start()
+    try:
+        await browser_manager.start()
+    except Exception as e:
+        logger.warning(f"No se pudo iniciar el browser al arrancar: {e}")
     yield
     await browser_manager.stop()
 

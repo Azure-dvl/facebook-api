@@ -44,13 +44,40 @@ class BrowserManager:
 
     async def stop(self) -> None:
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+    async def _ensure_started(self) -> None:
+        if self._browser is None or not self._browser.is_connected():
+            await self._restart()
+
+    async def _restart(self) -> None:
+        await self.stop()
+        await self.start()
 
     async def create_context(
         self, user_agent: str | None = None, cookies: list[dict] | None = None
     ) -> BrowserContext:
+        await self._ensure_started()
+        try:
+            return await self._make_context(user_agent, cookies)
+        except Exception:
+            await self._restart()
+            return await self._make_context(user_agent, cookies)
+
+    async def _make_context(
+        self, user_agent: str | None = None, cookies: list[dict] | None = None
+    ) -> BrowserContext:
+        await self._ensure_started()
         ua = user_agent or random_user_agent()
         viewport = random_viewport()
         context = await self._browser.new_context(
