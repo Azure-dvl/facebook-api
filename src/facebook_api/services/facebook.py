@@ -4,7 +4,7 @@ import random
 
 from playwright.async_api import BrowserContext, Page
 
-from facebook_api.utils.browser import BrowserManager, browser_manager, random_user_agent
+from facebook_api.utils.browser import browser_manager
 
 
 async def random_delay(min_s: float = 2.0, max_s: float = 5.0) -> None:
@@ -18,100 +18,17 @@ async def _safe_close_context(context: BrowserContext) -> None:
         pass
 
 
-async def _goto_login(page: Page) -> None:
+async def _goto(page: Page, url: str, timeout: int = 30000) -> None:
     attempt = 0
     while True:
         attempt += 1
         try:
-            await page.goto(
-                "https://www.facebook.com/login",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            await random_delay(1, 2)
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
             return
         except Exception as e:
             if attempt >= 2:
-                raise TimeoutError(
-                    f"No se pudo cargar la pagina de login de Facebook: {e}"
-                )
+                raise TimeoutError(f"No se pudo cargar {url}: {e}")
             await random_delay(2, 3)
-
-
-async def login_facebook(email: str, password: str) -> dict:
-    context = await browser_manager.create_context()
-    try:
-        page = await context.new_page()
-        page.set_default_timeout(30000)
-
-        await _goto_login(page)
-
-        email_input = page.locator('input[name="email"]')
-        try:
-            await email_input.first.wait_for(state="visible", timeout=15000)
-        except Exception:
-            raise Exception("No se renderizo el formulario de login de Facebook")
-        await email_input.first.fill(email)
-        await random_delay(0.5, 1)
-
-        pass_input = page.locator('input[name="pass"]')
-        try:
-            await pass_input.first.wait_for(state="visible", timeout=10000)
-        except Exception:
-            raise Exception("No se renderizo el campo de password")
-        await pass_input.first.fill(password)
-        await random_delay(0.5, 1)
-
-        submit_btn = page.locator('input[type="submit"]')
-        if await submit_btn.count() == 0:
-            submit_btn = page.locator('[role="button"]:has-text("Iniciar sesión")')
-        if await submit_btn.count() == 0:
-            submit_btn = page.locator('[role="button"]:has-text("Log In")')
-
-        submitted = False
-        if await submit_btn.count() > 0 and await submit_btn.first.is_enabled():
-            try:
-                await submit_btn.first.click(timeout=5000)
-                submitted = True
-            except Exception:
-                submitted = False
-
-        if not submitted:
-            await pass_input.first.press("Enter")
-
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=20000)
-        except asyncio.TimeoutError:
-            pass
-
-        await random_delay(3, 5)
-
-        current_url = page.url
-        if "checkpoint" in current_url:
-            raise Exception("Facebook pide verificacion adicional (checkpoint)")
-
-        cookies = await context.cookies()
-        user_agent = await page.evaluate("navigator.userAgent")
-
-        fb_user_id = None
-        has_session = False
-        for cookie in cookies:
-            if cookie["name"] == "c_user":
-                fb_user_id = cookie["value"]
-                has_session = True
-
-        if not has_session:
-            raise Exception(
-                "El login no se confirmo: credenciales invalidas o Facebook lo bloqueo"
-            )
-
-        return {
-            "cookies": cookies,
-            "user_agent": user_agent,
-            "fb_user_id": fb_user_id,
-        }
-    finally:
-        await _safe_close_context(context)
 
 
 def _cookies_are_session_cookies(cookies: list[dict]) -> bool:
@@ -175,12 +92,22 @@ async def _get_authenticated_context(
     return context, page
 
 
+async def _wait_for_first(
+    page: Page, selectors: list[str], timeout_ms: int = 15000
+) -> object | None:
+    for sel in selectors:
+        try:
+            await page.wait_for_selector(sel, timeout=timeout_ms)
+            return page.locator(sel).first
+        except Exception:
+            continue
+    return None
+
+
 async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
     context, page = await _get_authenticated_context(encrypted_cookies, decrypt_fn)
     try:
-        await page.goto(
-            "https://www.facebook.com/groups/feed", wait_until="networkidle"
-        )
+        await _goto(page, "https://www.facebook.com/groups/feed")
         await random_delay(2, 4)
 
         groups = []
@@ -214,7 +141,7 @@ async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
 
 
 async def _scrape_groups_via_search(page: Page) -> list[dict]:
-    await page.goto("https://www.facebook.com/groups", wait_until="networkidle")
+    await _goto(page, "https://www.facebook.com/groups")
     await random_delay(2, 3)
 
     groups = []
@@ -255,33 +182,34 @@ async def post_to_group(
 ) -> dict:
     context, page = await _get_authenticated_context(encrypted_cookies, decrypt_fn)
     try:
-        await page.goto(
-            f"https://www.facebook.com/groups/{group_id}", wait_until="networkidle"
-        )
+        page.set_default_timeout(30000)
+        await _goto(page, f"https://www.facebook.com/groups/{group_id}")
         await random_delay(2, 4)
 
-        composer = page.locator('[role="button"]:has-text("Escribir algo...")')
-        if await composer.count() == 0:
-            composer = page.locator('[role="button"]:has-text("Write something")')
-        if await composer.count() == 0:
-            composer = page.locator('[aria-label*="publicar"], [aria-label*="write"]')
-
-        if await composer.count() == 0:
+        composer = await _wait_for_first(
+            page,
+            [
+                '[role="button"]:has-text("Escribir algo...")',
+                '[role="button"]:has-text("Write something")',
+                '[aria-label*="publicar"], [aria-label*="write"]',
+            ],
+        )
+        if composer is None:
             raise Exception("Could not find post composer")
 
-        await composer.first.click()
+        await composer.click()
         await random_delay(1, 2)
 
-        textbox = page.locator('[role="textbox"][contenteditable="true"]')
-        if await textbox.count() == 0:
-            textbox = page.locator('[data-lexical-editor="true"]')
-
-        if await textbox.count() == 0:
+        textbox = await _wait_for_first(
+            page,
+            ['[role="textbox"][contenteditable="true"]', '[data-lexical-editor="true"]'],
+        )
+        if textbox is None:
             raise Exception("Could not find text input")
 
-        await textbox.first.click()
+        await textbox.click()
         await random_delay(0.3, 0.5)
-        await textbox.first.fill(text)
+        await textbox.fill(text)
         await random_delay(1, 2)
 
         if image_urls:
@@ -310,16 +238,17 @@ async def post_to_group(
                     for p in temp_paths:
                         os.unlink(p)
 
-        post_btn = page.locator(
-            'div[aria-label="Publicar"], div[aria-label="Post"]'
+        post_btn = await _wait_for_first(
+            page,
+            [
+                'div[aria-label="Publicar"], div[aria-label="Post"]',
+                'button:has-text("Publicar"), button:has-text("Post")',
+            ],
         )
-        if await post_btn.count() == 0:
-            post_btn = page.locator('button:has-text("Publicar"), button:has-text("Post")')
-
-        if await post_btn.count() == 0:
+        if post_btn is None:
             raise Exception("Could not find post button")
 
-        await post_btn.first.click()
+        await post_btn.click()
         await random_delay(3, 5)
 
         return {"status": "success", "group_id": group_id}
@@ -337,33 +266,34 @@ async def post_to_profile(
 ) -> dict:
     context, page = await _get_authenticated_context(encrypted_cookies, decrypt_fn)
     try:
-        await page.goto("https://www.facebook.com/", wait_until="networkidle")
+        page.set_default_timeout(30000)
+        await _goto(page, "https://www.facebook.com/")
         await random_delay(2, 4)
 
-        composer = page.locator(
-            '[aria-label*="en que estas pensando"], [aria-label*="on your mind"]'
+        composer = await _wait_for_first(
+            page,
+            [
+                '[aria-label*="en que estas pensando"], [aria-label*="on your mind"]',
+                '[role="button"]:has-text("¿Qué hay de nuevo")',
+                '[role="button"]:has-text("What")',
+            ],
         )
-        if await composer.count() == 0:
-            composer = page.locator('[role="button"]:has-text("¿Qué hay de nuevo")')
-        if await composer.count() == 0:
-            composer = page.locator('[role="button"]:has-text("What")')
-
-        if await composer.count() == 0:
+        if composer is None:
             raise Exception("Could not find profile post composer")
 
-        await composer.first.click()
+        await composer.click()
         await random_delay(1, 2)
 
-        textbox = page.locator('[role="textbox"][contenteditable="true"]')
-        if await textbox.count() == 0:
-            textbox = page.locator('[data-lexical-editor="true"]')
-
-        if await textbox.count() == 0:
+        textbox = await _wait_for_first(
+            page,
+            ['[role="textbox"][contenteditable="true"]', '[data-lexical-editor="true"]'],
+        )
+        if textbox is None:
             raise Exception("Could not find text input")
 
-        await textbox.first.click()
+        await textbox.click()
         await random_delay(0.3, 0.5)
-        await textbox.first.fill(text)
+        await textbox.fill(text)
         await random_delay(1, 2)
 
         if image_urls:
@@ -392,16 +322,17 @@ async def post_to_profile(
                     for p in temp_paths:
                         os.unlink(p)
 
-        post_btn = page.locator(
-            'div[aria-label="Publicar"], div[aria-label="Post"]'
+        post_btn = await _wait_for_first(
+            page,
+            [
+                'div[aria-label="Publicar"], div[aria-label="Post"]',
+                'button:has-text("Publicar"), button:has-text("Post")',
+            ],
         )
-        if await post_btn.count() == 0:
-            post_btn = page.locator('button:has-text("Publicar"), button:has-text("Post")')
-
-        if await post_btn.count() == 0:
+        if post_btn is None:
             raise Exception("Could not find post button")
 
-        await post_btn.first.click()
+        await post_btn.click()
         await random_delay(3, 5)
 
         return {"status": "success"}

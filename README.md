@@ -26,6 +26,10 @@ sesion a la API:
 
 Las cookies de sesion duran aprox. 90 dias; luego se repite la exportacion.
 
+Al reiniciar la API (`uv run python main.py`), esta carga automaticamente la
+ultima sesion activa guardada en PostgreSQL; solo hay que re-autenticar si no
+hay ninguna sesion guardada.
+
 ## Requisitos
 
 - Python 3.13 (via `uv`)
@@ -94,17 +98,15 @@ src/facebook_api/
   schemas/                 Pydantic
   routers/                 auth, groups, posts
   services/
-    auth.py                import_cookies() + complete_auth() + start_auth_flow()
+    auth.py                import_cookies() + get_last_active_session()
     facebook.py            Playwright: verify_cookies, list_groups, post_*
   utils/
     browser.py             BrowserManager (lazy, tolerante a crashes)
     crypto.py              Fernet (cifra cookies)
-    qrcode.py              QR tokens (flujo legacy, opcional)
     state.py               LoginState (asyncio.Event)
 extension/                 Extension Chrome/Edge que exporta la sesion
 src/test/
   test.py                  Publica "Prueba" en el perfil
-  import_cookies.py        Fallback manual de import de cookies
 ```
 
 ## Nota legal

@@ -16,7 +16,6 @@ dependencies = [
     "playwright>=1.49",
     "playwright-stealth>=1.0",
     "cryptography>=44",
-    "qrcode[pil]>=8.0",
     "python-dotenv>=1.0",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",

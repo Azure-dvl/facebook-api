@@ -1,20 +1,13 @@
-import base64
 import json
 
-from facebook_api.config import settings
+from sqlalchemy import select
+
 from facebook_api.models.session import FacebookSession
 from facebook_api.services.facebook import (
     _cookies_are_session_cookies,
-    login_facebook,
     verify_cookies,
 )
 from facebook_api.utils.crypto import encrypt_data
-from facebook_api.utils.qrcode import (
-    consume_qr_token,
-    create_qr_token,
-    generate_qr_image,
-    validate_qr_token,
-)
 from facebook_api.utils.state import login_state
 
 _SAMESITE_MAP = {
@@ -100,40 +93,11 @@ async def import_cookies(
     return session
 
 
-def start_auth_flow() -> dict:
-    token = create_qr_token()
-    login_url = f"{settings.PUBLIC_BASE_URL}/auth/login?t={token}"
-    qr_bytes = generate_qr_image(login_url)
-    qr_b64 = base64.b64encode(qr_bytes).decode()
-    return {
-        "qr_image_base64": qr_b64,
-        "login_url": login_url,
-        "expires_in": settings.QR_TOKEN_TTL,
-    }
-
-
-async def complete_auth(
-    token: str, email: str, password: str, session_name: str, db
-) -> FacebookSession:
-    if not validate_qr_token(token):
-        raise ValueError("El link es invalido o expiro. Genera un nuevo QR.")
-
-    result = await login_facebook(email, password)
-
-    consume_qr_token(token)
-
-    cookies_json = json.dumps(result["cookies"])
-    encrypted = encrypt_data(cookies_json)
-
-    session = FacebookSession(
-        session_name=session_name,
-        fb_user_id=result.get("fb_user_id"),
-        fb_email=email,
-        encrypted_cookies=encrypted,
-        user_agent=result["user_agent"],
-        is_active=True,
+async def get_last_active_session(db) -> FacebookSession | None:
+    result = await db.execute(
+        select(FacebookSession)
+        .where(FacebookSession.is_active)
+        .order_by(FacebookSession.created_at.desc())
+        .limit(1)
     )
-    db.add(session)
-    await db.commit()
-    await db.refresh(session)
-    return session
+    return result.scalar_one_or_none()

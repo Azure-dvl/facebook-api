@@ -17,9 +17,7 @@ class Settings(BaseSettings):
 
     ENCRYPTION_KEY: str = ""
 
-    QR_TOKEN_TTL: int = 600
-
-    # URL publica bajo la cual se accede a la API (la que va en el QR / link).
+    # URL publica bajo la cual se accede a la API (la que van en los links).
     # Por defecto localhost. Para un servidor remoto configurala con el host/IP
     # alcanzable (ej: "https://api.midominio.com" o "http://192.168.1.5:8000").
     # PENSA: si la dejas vacia se usa la ip/host detectada del request.

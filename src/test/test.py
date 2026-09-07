@@ -22,9 +22,11 @@ def get_active_session_id() -> str:
     active = [s for s in sessions if s.get("is_active")]
     if not active:
         raise RuntimeError(
-            "No hay sesiones activas. Autenticate primero con cualquiera de estas opciones:\n"
-            "  1. uv run python main.py -> escanea el QR y completa el login.\n"
-            "  2. uv run python src/test/import_cookies.py -> importa cookies de tu sesion real."
+            "No hay sesiones activas. Autenticate primero:\n"
+            "  1. Arranca la API: uv run python main.py\n"
+            "  2. Abre https://www.facebook.com y logueate con tu cuenta.\n"
+            "  3. Pulsa el icono de la extension de navegador (carpeta extension/) "
+            "y 'Exportar sesion'."
         )
     return active[0]["id"]
 

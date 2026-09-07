@@ -1,13 +1,6 @@
 from pydantic import BaseModel, Field
 
 
-class CredentialRequest(BaseModel):
-    token: str
-    email: str
-    password: str
-    session_name: str = "default"
-
-
 class CookieDict(BaseModel):
     name: str
     value: str
@@ -24,12 +17,6 @@ class ImportCookiesRequest(BaseModel):
     session_name: str = "default"
     fb_user_id: str | None = Field(default=None, description="ID del usuario (opcional, se auto-detecta si no se da)")
     fb_email: str = "imported"
-
-
-class StartAuthResponse(BaseModel):
-    qr_image_base64: str
-    login_url: str
-    expires_in: int
 
 
 class SessionInfo(BaseModel):

@@ -6,7 +6,9 @@ import urllib.request
 import uvicorn
 
 from facebook_api.config import settings
+from facebook_api.database import async_session, init_db
 from facebook_api.main import app
+from facebook_api.services.auth import get_last_active_session
 from facebook_api.utils.state import login_state
 
 logging.basicConfig(
@@ -66,9 +68,20 @@ async def run() -> None:
     print(f"    3. Pulsa el icono de la extension y 'Exportar sesion'.\n")
     sys.stdout.flush()
 
-    logger.info("Esperando autenticacion de Facebook (via extension)...")
-    session_id = await login_state.wait_for_login()
-    logger.info(f"Se ha logueado correctamente. Session ID: {session_id}")
+    await init_db()
+    async with async_session() as db:
+        saved_session = await get_last_active_session(db)
+
+    if saved_session:
+        logger.info(
+            f"Se encontro una sesion guardada ({saved_session.session_name}). "
+            "Cargando sin necesidad de re-autenticar..."
+        )
+        login_state.mark_logged_in(str(saved_session.id))
+    else:
+        logger.info("Esperando autenticacion de Facebook (via extension)...")
+        session_id = await login_state.wait_for_login()
+        logger.info(f"Se ha logueado correctamente. Session ID: {session_id}")
 
     try:
         await server_task
