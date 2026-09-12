@@ -13,7 +13,6 @@ from facebook_api.schemas.post import (
     PostResponse,
 )
 from facebook_api.services.facebook import post_to_group, post_to_profile
-from facebook_api.utils.crypto import decrypt_data
 
 router = APIRouter(prefix="/posts", tags=["posts"])
 
@@ -43,8 +42,8 @@ async def create_post(req: CreatePostRequest, db: AsyncSession = Depends(get_db)
 
     if req.target == "group":
         result = await post_to_group(
-            session.encrypted_cookies,
-            decrypt_data,
+            session,
+            db,
             req.target_id,
             req.text,
             req.image_urls,
@@ -53,8 +52,8 @@ async def create_post(req: CreatePostRequest, db: AsyncSession = Depends(get_db)
         target_type = TargetType.group
     else:
         result = await post_to_profile(
-            session.encrypted_cookies,
-            decrypt_data,
+            session,
+            db,
             req.text,
             req.image_urls,
         )

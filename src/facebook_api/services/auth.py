@@ -1,14 +1,19 @@
+import asyncio
 import json
+import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from facebook_api.models.session import FacebookSession
 from facebook_api.services.facebook import (
     _cookies_are_session_cookies,
     verify_cookies,
 )
+from facebook_api.utils.browser import random_user_agent
 from facebook_api.utils.crypto import encrypt_data
 from facebook_api.utils.state import login_state
+
+logger = logging.getLogger("facebook-api")
 
 _SAMESITE_MAP = {
     "no_restriction": "None",
@@ -68,21 +73,44 @@ async def import_cookies(
             "Faltan c_user y xs/datr."
         )
 
-    verification = await verify_cookies(cookies)
+    # Facebook a veces responde con timeout o pagina de login en el primer
+    # intento con un contexto nuevo. Reintentamos la verificacion antes de
+    # rechazar la sesion importada.
+    verification = {"valid": False, "reason": "No se pudo verificar"}
+    last_error = None
+    for attempt in range(3):
+        try:
+            verification = await verify_cookies(cookies)
+        except Exception as e:
+            last_error = str(e)
+            verification = {"valid": False, "reason": str(e)}
+        if verification["valid"]:
+            break
+        await asyncio.sleep(1.5 * (attempt + 1))
+
     if not verification["valid"]:
-        raise ValueError(
-            f"Cookies invalidas: {verification.get('reason', 'desconocido')}"
-        )
+        reason = verification.get("reason") or last_error or "desconocido"
+        logger.warning("Import de cookies rechazado tras reintentos: %s", reason)
+        raise ValueError(f"Cookies invalidas: {reason}")
 
     resolved_user_id = fb_user_id or verification.get("fb_user_id")
     encrypted = encrypt_data(json.dumps(cookies))
+
+    # Nueva sesion activa: desactivamos las anteriores para que siempre se
+    # use la ultima sesion exportada.
+    await db.execute(
+        update(FacebookSession)
+        .where(FacebookSession.is_active == True)
+        .values(is_active=False)
+    )
+    await db.flush()
 
     session = FacebookSession(
         session_name=session_name,
         fb_user_id=resolved_user_id,
         fb_email=fb_email,
         encrypted_cookies=encrypted,
-        user_agent="extension",
+        user_agent=random_user_agent(),
         is_active=True,
     )
     db.add(session)
