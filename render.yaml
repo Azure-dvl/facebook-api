@@ -1,5 +1,6 @@
 # =============================================================
 # Render.com -- facebook-api (solo para TESTING)
+# Base de datos: Supabase Postgres (Session Pooler).
 # TODO: todos los valores marcados con sync:false se llenan a
 # mano en el panel de Render (ver HOSTING.md).
 # =============================================================
@@ -15,19 +16,23 @@ services:
     envVars:
       - key: DB_HOST
         sync: false
-        # TODO: host interno del Postgres de facebook-api (Render)
+        # TODO: host del Session Pooler de Supabase
+        #       (ej: aws-0-us-east-1.pooler.supabase.com)
       - key: DB_PORT
         sync: false
-        # TODO: 5432
+        # TODO: 5432 (Session Pooler)
       - key: DB_USER
         sync: false
-        # TODO: usuario del Postgres de facebook-api
+        # TODO: postgres.<project-ref>  (Session Pooler)
       - key: DB_PASSWORD
         sync: false
-        # TODO: password del Postgres de facebook-api
+        # TODO: password de la base (Supabase > Settings > Database)
       - key: DB_NAME
         sync: false
-        # TODO: nombre de la base (ej. facebook_api)
+        # TODO: postgres   (nombre de base por defecto de Supabase)
+      - key: DB_SSL
+        sync: false
+        # TODO: true   (Supabase exige SSL)
       - key: ENCRYPTION_KEY
         sync: false
         # TODO: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

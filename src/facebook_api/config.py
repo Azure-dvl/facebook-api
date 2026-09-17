@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     DB_USER: str = "fb_user"
     DB_PASSWORD: str = ""
     DB_NAME: str = "facebook_api"
+    # Supabase (y la mayoria de Postgres gestionados) exigen SSL.
+    # En local dejalo en false; en Supabase true.
+    DB_SSL: bool = False
 
     ENCRYPTION_KEY: str = ""
 
@@ -25,17 +28,19 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
-        return (
+        url = (
             f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASSWORD}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
+        return f"{url}?sslmode=require" if self.DB_SSL else url
 
     @property
     def DATABASE_URL_SYNC(self) -> str:
-        return (
+        url = (
             f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
+        return f"{url}?sslmode=require" if self.DB_SSL else url
 
     @property
     def PUBLIC_BASE_URL(self) -> str:
