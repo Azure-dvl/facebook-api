@@ -16,6 +16,7 @@ class TargetType(enum.Enum):
 
 class PostStatus(enum.Enum):
     success = "success"
+    pending_approval = "pending_approval"
     failed = "failed"
 
 

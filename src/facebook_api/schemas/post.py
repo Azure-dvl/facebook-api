@@ -13,6 +13,7 @@ class PostResponse(BaseModel):
     status: str
     post_id: str | None = None
     error: str | None = None
+    group_requires_approval: bool | None = None
 
 
 class PostLogEntry(BaseModel):

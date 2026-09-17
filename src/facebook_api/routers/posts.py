@@ -60,7 +60,12 @@ async def create_post(req: CreatePostRequest, db: AsyncSession = Depends(get_db)
         target_id = "me"
         target_type = TargetType.profile
 
-    status = PostStatus.success if result["status"] == "success" else PostStatus.failed
+    status_map = {
+        "success": PostStatus.success,
+        "pending_approval": PostStatus.pending_approval,
+        "failed": PostStatus.failed,
+    }
+    status = status_map.get(result["status"], PostStatus.failed)
 
     log = PostLog(
         session_id=session.id,
@@ -79,6 +84,7 @@ async def create_post(req: CreatePostRequest, db: AsyncSession = Depends(get_db)
         status=result["status"],
         post_id=str(log.id),
         error=result.get("error"),
+        group_requires_approval=result.get("group_requires_approval") or None,
     )
 
 

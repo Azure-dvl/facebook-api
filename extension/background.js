@@ -1,19 +1,23 @@
 const DEFAULT_API_URL = "http://localhost:8000";
 
-chrome.runtime.onInstalled.addListener(async () => {
-  const { apiUrl } = await chrome.storage.local.get("apiUrl");
+async function getApiUrl() {
+  const { apiUrl } = await browser.storage.local.get("apiUrl");
+  return apiUrl || DEFAULT_API_URL;
+}
+
+browser.runtime.onInstalled.addListener(async () => {
+  const { apiUrl } = await browser.storage.local.get("apiUrl");
   if (!apiUrl) {
-    await chrome.storage.local.set({ apiUrl: DEFAULT_API_URL });
+    await browser.storage.local.set({ apiUrl: DEFAULT_API_URL });
   }
 });
 
 async function readFacebookCookies() {
-  return chrome.cookies.getAll({ domain: ".facebook.com" });
+  return browser.cookies.getAll({ domain: ".facebook.com" });
 }
 
 async function exportSession() {
-  const { apiUrl } = await chrome.storage.local.get("apiUrl");
-  const base = apiUrl || DEFAULT_API_URL;
+  const base = await getApiUrl();
   const url = `${base.replace(/\/$/, "")}/auth/import-cookies`;
 
   const cookies = await readFacebookCookies();
@@ -21,7 +25,7 @@ async function exportSession() {
     return {
       ok: false,
       error:
-        "No se encontraron cookies de Facebook. Abre primero facebook.com y logueate.",
+        "No se encontraron cookies de Facebook. Abre primero facebook.com y loguéate.",
     };
   }
 
@@ -49,7 +53,7 @@ async function exportSession() {
   } catch (err) {
     return {
       ok: false,
-      error: `No se pudo conectar con la API en ${base}. Revisa que este corriendo (uv run python main.py) y que la URL sea correcta. Detalle: ${err}`,
+      error: `No se pudo conectar con la API en ${base}. Revisa que esté corriendo (uv run python main.py) y que la URL sea correcta. Detalle: ${err}`,
     };
   }
 
@@ -72,7 +76,7 @@ async function exportSession() {
   return { ok: true, data };
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+browser.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "EXPORT_SESSION") {
     exportSession().then(sendResponse);
     return true;

@@ -8,22 +8,22 @@ function setStatus(text, kind) {
 }
 
 async function init() {
-  const { apiUrl } = await chrome.storage.local.get("apiUrl");
+  const { apiUrl } = await browser.storage.local.get("apiUrl");
   if (apiUrl) apiUrlInput.value = apiUrl;
 }
 
 apiUrlInput.addEventListener("change", async () => {
-  await chrome.storage.local.set({ apiUrl: apiUrlInput.value.trim() });
+  await browser.storage.local.set({ apiUrl: apiUrlInput.value.trim() });
 });
 
 exportBtn.addEventListener("click", async () => {
   exportBtn.disabled = true;
-  setStatus("Exportando sesion...", "info");
+  setStatus("Exportando sesión...", "info");
   try {
-    const response = await chrome.runtime.sendMessage({ type: "EXPORT_SESSION" });
+    const response = await browser.runtime.sendMessage({ type: "EXPORT_SESSION" });
     if (response && response.ok) {
       setStatus(
-        `Sesion exportada correctamente. Session ID: ${response.data.session_id}`,
+        `Sesión exportada correctamente. Session ID: ${response.data.session_id}`,
         "ok"
       );
     } else {

@@ -473,38 +473,81 @@ _ERR_PATTERNS = (
     "vuelve a intentar",
     "se produjo un error",
     "no está disponible",
-    "en revisión",
     "no se ha completado",
     "couldn't",
     "something went wrong",
     "please try again",
 )
 
+_REVIEW_BUTTON_LABELS_RAW = (
+    "Enviar para revisión",
+    "Submit for review",
+    "Solicitar revisión",
+    "Enviar",
+)
+_REVIEW_BUTTON_LABELS = tuple(label.lower() for label in _REVIEW_BUTTON_LABELS_RAW)
+
+_REVIEW_PATTERNS = (
+    "revisión",
+    "revision",
+    "aprobación",
+    "aprobacion",
+    "aprobado por",
+    "aprobada por",
+    "será revisada",
+    "sera revisada",
+    "serán revisadas",
+    "seran revisadas",
+    "en espera",
+    "se envió",
+    "se envio",
+    "se ha enviado",
+    "se enviará",
+    "se enviara",
+    "por el administrador",
+    "por los administradores",
+    "administración",
+    "pendiente",
+    "pending",
+    "review",
+    "approval",
+    "approve",
+    "awaiting",
+    "submitted",
+)
+
 
 async def _wait_publish_enabled(page: Page, timeout: float = 90.0):
-    """Espera a que exista un botón Publicar habilitado dentro del composer
-    (la subida de imágenes debe terminar antes de habilitarse)."""
+    """Espera a que exista un botón de envío habilitado dentro del composer
+    (Publicar / Enviar para revisión; la subida de imágenes debe terminar
+    antes de habilitarse). Prioriza los botones de revisión del admin."""
     t0 = time.monotonic()
-    loc = page.locator(
-        '[role="dialog"] [role="button"][aria-label="Publicar"], '
-        '[role="dialog"] [aria-label="Publicar"], '
-        '[role="dialog"] [role="button"][aria-label="Post"], '
-        '[role="dialog"] [role="button"]:has-text("Publicar")'
-    )
+    candidates: list[str] = []
+    for label in _REVIEW_BUTTON_LABELS_RAW:
+        candidates.append(f'[role="dialog"] [role="button"][aria-label="{label}"]')
+        candidates.append(f'[role="dialog"] [aria-label="{label}"]')
+    candidates += [
+        '[role="dialog"] [role="button"][aria-label="Publicar"]',
+        '[role="dialog"] [aria-label="Publicar"]',
+        '[role="dialog"] [role="button"][aria-label="Post"]',
+        '[role="dialog"] [role="button"]:has-text("Publicar")',
+    ]
     while time.monotonic() - t0 < timeout:
-        try:
-            n = await loc.count()
-            for i in range(n):
-                btn = loc.nth(i)
-                aria_disabled = await btn.get_attribute("aria-disabled")
-                try:
-                    disabled = await btn.is_disabled()
-                except Exception:
-                    disabled = False
-                if aria_disabled != "true" and not disabled:
-                    return btn
-        except Exception:
-            pass
+        for sel in candidates:
+            try:
+                loc = page.locator(sel)
+                n = await loc.count()
+                for i in range(n):
+                    btn = loc.nth(i)
+                    aria_disabled = await btn.get_attribute("aria-disabled")
+                    try:
+                        disabled = await btn.is_disabled()
+                    except Exception:
+                        disabled = False
+                    if aria_disabled != "true" and not disabled:
+                        return btn
+            except Exception:
+                continue
         await asyncio.sleep(0.5)
     return None
 
@@ -527,19 +570,34 @@ async def _toast_text(page: Page) -> str:
 
 
 async def _wait_publish_result(page: Page, timeout: float = 180.0) -> dict:
-    """Confirma con certeza que la publicación se realizó: cierre del composer
-    o toast de éxito, sin toasts de error. Devuelve {"ok": bool, "error": str}."""
+    """Confirma con certeza el resultado del envío: cierre del composer o toast
+    de éxito (publicado) o de revisión del administrador (pendiente de aprobación).
+    Devuelve {"ok": bool, "error": str, "pending_approval": bool}."""
     t0 = time.monotonic()
     in_progress = ("publicando", "subiendo", "uploading", "procesando", "processing")
     composer = page.locator(f"{_COMPOSER_DIALOGS[0]}, {_COMPOSER_DIALOGS[1]}")
+
+    def _flag(text: str) -> str | None:
+        low = (text or "").lower()
+        if any(p in low for p in ("publicado", "se publicó", "se ha publicado", "publicada en")):
+            return "success"
+        if any(p in low for p in _ERR_PATTERNS):
+            return "error"
+        if any(p in low for p in _REVIEW_PATTERNS):
+            return "pending"
+        return None
+
     while time.monotonic() - t0 < timeout:
         toast = await _toast_text(page)
-        low = toast.lower()
         if toast:
-            if any(p in low for p in ("publicado", "se publicó", "se ha publicado", "publicada en")):
-                await asyncio.sleep(1.5)
-                return {"ok": True, "error": ""}
-            if any(p in low for p in _ERR_PATTERNS):
+            flag = _flag(toast)
+            if flag:
+                if flag == "success":
+                    await asyncio.sleep(1.5)
+                    return {"ok": True, "error": "", "pending_approval": False}
+                if flag == "pending":
+                    await asyncio.sleep(1.0)
+                    return {"ok": True, "error": "", "pending_approval": True}
                 return {"ok": False, "error": f"Facebook: {toast[:200]}", "toast": toast}
         try:
             if await composer.count():
@@ -556,10 +614,13 @@ async def _wait_publish_result(page: Page, timeout: float = 180.0) -> dict:
             if await composer.count() == 0:
                 await asyncio.sleep(2)
                 toast = await _toast_text(page)
-                low = toast.lower()
-                if toast and any(p in low for p in _ERR_PATTERNS):
-                    return {"ok": False, "error": f"Facebook: {toast[:200]}", "toast": toast}
-                return {"ok": True, "error": ""}
+                if toast:
+                    flag = _flag(toast)
+                    if flag == "error":
+                        return {"ok": False, "error": f"Facebook: {toast[:200]}", "toast": toast}
+                    if flag == "pending":
+                        return {"ok": True, "error": "", "pending_approval": True}
+                return {"ok": True, "error": "", "pending_approval": False}
         except Exception:
             pass
         await asyncio.sleep(0.75)
@@ -572,10 +633,21 @@ async def _wait_publish_result(page: Page, timeout: float = 180.0) -> dict:
     return {"ok": False, "error": "La publicación no se completó (el diálogo del composer siguió abierto)"}
 
 
-async def _confirm_publish(page: Page) -> None:
+async def _confirm_publish(page: Page) -> dict:
     btn = await _wait_publish_enabled(page)
     if btn is None:
         raise Exception("El botón Publicar no está disponible (subida pendiente o error del composer)")
+    label = ""
+    try:
+        label = ((await btn.inner_text()) or "").strip().lower()
+    except Exception:
+        pass
+    if not label:
+        try:
+            label = ((await btn.get_attribute("aria-label")) or "").strip().lower()
+        except Exception:
+            pass
+    button_is_review = any(m in label for m in _REVIEW_BUTTON_LABELS)
     try:
         await btn.evaluate(
             """(el) => {
@@ -590,79 +662,150 @@ async def _confirm_publish(page: Page) -> None:
         except Exception:
             pass
     result = await _wait_publish_result(page)
+    result["pending_approval"] = button_is_review or result.get("pending_approval", False)
     if not result["ok"]:
         raise Exception(result["error"])
+    return result
+
+
+_MAX_GROUPS = 2000
+_SCROLL_STALL_LIMIT = 4
+
+
+def _group_id_from_href(href: str) -> str | None:
+    try:
+        parts = href.rstrip("/").split("/")
+        idx = parts.index("groups")
+        candidate = parts[idx + 1].split("?")[0]
+        return candidate if candidate.isdigit() else None
+    except (ValueError, IndexError):
+        return None
+
+
+async def _collect_group_links(page: Page, seen: dict[str, str]) -> None:
+    try:
+        links = await page.query_selector_all(
+            'a[href*="/groups/"][target="_self"], a[href*="/groups/"]'
+        )
+    except Exception:
+        return
+    for link in links:
+        try:
+            href = await link.get_attribute("href")
+            if not href or "/groups/" not in href:
+                continue
+            gid = _group_id_from_href(href)
+            if not gid or gid in seen:
+                continue
+            name = await link.inner_text()
+            seen[gid] = clean_group_name(name) or f"Grupo {gid}"
+        except Exception:
+            continue
+
+
+async def _scroll_to_bottom(page: Page) -> None:
+    try:
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    except Exception:
+        pass
+    await random_delay(1.2, 1.8)
+    try:
+        await page.keyboard.press("End")
+    except Exception:
+        pass
+    await asyncio.sleep(0.5)
+
+
+async def _scroll_all_groups(page: Page, max_scrolls: int = 90) -> dict[str, str]:
+    """Recorre la lista de grupos haciendo scroll hasta que dejen de aparecer
+    ids nuevos (o se alcance el tope)."""
+    seen: dict[str, str] = {}
+    stall = 0
+    for _ in range(max_scrolls):
+        before = len(seen)
+        await _collect_group_links(page, seen)
+        if len(seen) >= _MAX_GROUPS:
+            break
+        if len(seen) == before:
+            stall += 1
+            if stall >= _SCROLL_STALL_LIMIT:
+                break
+        else:
+            stall = 0
+        await _scroll_to_bottom(page)
+    return seen
 
 
 async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
     context, page = await _get_authenticated_context(encrypted_cookies, decrypt_fn)
     try:
-        await _goto(page, "https://www.facebook.com/groups/feed")
-        await random_delay(2, 4)
-        await _dismiss_account_chooser(page)
-        await random_delay(1, 2)
-
-        groups = []
-        group_links = await page.query_selector_all(
-            'a[href*="/groups/"][target="_self"], a[href*="/groups/"]'
-        )
-
-        seen_ids = set()
-        for link in group_links:
-            href = await link.get_attribute("href")
-            name = await link.inner_text()
-            if not href or "/groups/" not in href:
-                continue
-            parts = href.rstrip("/").split("/")
+        seen: dict[str, str] = {}
+        for url in (
+            "https://www.facebook.com/groups/joins/",
+            "https://www.facebook.com/groups/?category=membership",
+            "https://www.facebook.com/groups/feed",
+        ):
             try:
-                idx = parts.index("groups")
-                group_id = parts[idx + 1]
-            except (ValueError, IndexError):
+                await _goto(page, url)
+                await random_delay(2, 4)
+                await _dismiss_account_chooser(page)
+                await random_delay(1, 2)
+                found = await _scroll_all_groups(page)
+                seen = {**found, **seen}  # la primera página tiene prioridad
+                if len(seen) >= _MAX_GROUPS:
+                    break
+            except Exception:
                 continue
-            if group_id in seen_ids or not group_id.isdigit():
-                continue
-            seen_ids.add(group_id)
-            groups.append({"id": group_id, "name": clean_group_name(name)})
 
-        if not groups:
-            groups = await _scrape_groups_via_search(page)
+        if not seen:
+            found = await _scrape_groups_via_search(page)
+            seen = {**found, **seen}
 
-        return groups
+        return [{"id": gid, "name": name} for gid, name in seen.items()]
     finally:
         await _safe_close_context(context)
 
 
-async def _scrape_groups_via_search(page: Page) -> list[dict]:
-    await _goto(page, "https://www.facebook.com/groups")
+async def _scrape_groups_via_search(page: Page) -> dict[str, str]:
+    try:
+        await _goto(page, "https://www.facebook.com/groups")
+    except Exception:
+        return {}
     await random_delay(2, 3)
 
-    groups = []
-    cards = await page.query_selector_all('[class*="x1i10hfl"]')
-    seen_ids = set()
-
-    for card in cards:
+    seen: dict[str, str] = {}
+    stall = 0
+    for _ in range(40):
+        before = len(seen)
         try:
-            link = await card.query_selector('a[href*="/groups/"]')
-            if not link:
-                continue
-            href = await link.get_attribute("href")
-            name = await card.inner_text()
-            if not href:
-                continue
-            parts = href.rstrip("/").split("/")
-            try:
-                idx = parts.index("groups")
-                group_id = parts[idx + 1]
-            except (ValueError, IndexError):
-                continue
-            if group_id in seen_ids or not group_id.isdigit():
-                continue
-            seen_ids.add(group_id)
-            groups.append({"id": group_id, "name": clean_group_name(name)})
+            cards = await page.query_selector_all('[class*="x1i10hfl"]')
+            for card in cards:
+                try:
+                    link = await card.query_selector('a[href*="/groups/"]')
+                    if not link:
+                        continue
+                    href = await link.get_attribute("href")
+                    if not href:
+                        continue
+                    gid = _group_id_from_href(href)
+                    if not gid or gid in seen:
+                        continue
+                    name = await card.inner_text()
+                    seen[gid] = clean_group_name(name) or f"Grupo {gid}"
+                except Exception:
+                    continue
         except Exception:
-            continue
-
-    return groups
+            pass
+        if len(seen) >= _MAX_GROUPS:
+            break
+        if len(seen) == before:
+            stall += 1
+            if stall >= _SCROLL_STALL_LIMIT:
+                break
+        else:
+            stall = 0
+        await _scroll_to_bottom(page)
+    return seen
 
 
 async def post_to_group(
@@ -710,9 +853,17 @@ async def post_to_group(
         if image_urls:
             await _attach_images(page, image_urls)
 
-        await _confirm_publish(page)
+        result = await _confirm_publish(page)
 
         await _persist_session_cookies(context, session, db)
+        if result.get("pending_approval"):
+            logger.info("[grupo] enviado para revisión del admin group=%s", group_id)
+            return {
+                "status": "pending_approval",
+                "group_id": group_id,
+                "group_requires_approval": True,
+                "error": "Publicación enviada; queda pendiente la aprobación del administrador del grupo.",
+            }
         logger.info("[grupo] publicado group=%s text=%r", group_id, text[:40])
         return {"status": "success", "group_id": group_id}
     except Exception as e:

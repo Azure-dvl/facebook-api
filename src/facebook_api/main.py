@@ -44,3 +44,8 @@ app.include_router(posts.router)
 @app.get("/")
 async def root():
     return {"message": "Facebook API is running"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
