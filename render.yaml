@@ -1,0 +1,36 @@
+# =============================================================
+# Render.com -- facebook-api (solo para TESTING)
+# TODO: todos los valores marcados con sync:false se llenan a
+# mano en el panel de Render (ver HOSTING.md).
+# =============================================================
+services:
+  - type: web
+    name: facebook-api
+    runtime: docker
+    region: oregon
+    plan: starter
+    healthCheckPath: /health
+    dockerContext: .
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: DB_HOST
+        sync: false
+        # TODO: host interno del Postgres de facebook-api (Render)
+      - key: DB_PORT
+        sync: false
+        # TODO: 5432
+      - key: DB_USER
+        sync: false
+        # TODO: usuario del Postgres de facebook-api
+      - key: DB_PASSWORD
+        sync: false
+        # TODO: password del Postgres de facebook-api
+      - key: DB_NAME
+        sync: false
+        # TODO: nombre de la base (ej. facebook_api)
+      - key: ENCRYPTION_KEY
+        sync: false
+        # TODO: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - key: APP_PUBLIC_URL
+        sync: false
+        # TODO: https://tu-facebook-api.onrender.com
