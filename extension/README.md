@@ -38,9 +38,6 @@ en grupos con esa sesión.
 2. Pulsa el icono de la extensión.
 3. Verifica que la "URL de la API" sea correcta (default `http://localhost:8000`).
    Si la API está en otro host, cámbiala y se guardará.
-   > TODO (HOSTING): para el despliegue de testing en Render, escribe
-   > `https://<tu-facebook-api>.onrender.com` en el campo *URL de la API*.
-   > Ver [`../HOSTING.md`](../HOSTING.md).
 4. Pulsa "Exportar sesión".
 5. En la consola donde corre la API debería aparecer
    `Se ha logueado correctamente. Session ID: ...`.
