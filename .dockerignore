@@ -1,0 +1,32 @@
+# El build solo necesita esto: pyproject.toml, uv.lock, README.md,
+# src/facebook_api/, main.py y entrypoint.sh
+
+# Entornos locales
+.venv
+venv
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# VCS y logs
+.git
+.gitmodules
+.gitignore
+*.log
+
+# Secretos: en Docker se pasan como variables de entorno (-e / --env-file)
+.env
+.env.*
+!.env.example
+
+# No forman parte de la imagen: la extension se instala en el navegador del
+# usuario y no hay migraciones Alembic (el esquema lo crea init_db).
+extension
+alembic
+alembic.ini
+src/test
