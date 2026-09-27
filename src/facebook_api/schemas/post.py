@@ -14,6 +14,9 @@ class PostResponse(BaseModel):
     post_id: str | None = None
     error: str | None = None
     group_requires_approval: bool | None = None
+    # imágenes solicitadas vs. realmente adjuntadas al composer
+    images_attached: int = 0
+    images_total: int = 0
 
 
 class PostLogEntry(BaseModel):

@@ -85,6 +85,8 @@ async def create_post(req: CreatePostRequest, db: AsyncSession = Depends(get_db)
         post_id=str(log.id),
         error=result.get("error"),
         group_requires_approval=result.get("group_requires_approval") or None,
+        images_attached=int(result.get("images_attached") or 0),
+        images_total=int(result.get("images_total") or 0),
     )
 
 

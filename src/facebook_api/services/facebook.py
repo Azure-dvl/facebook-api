@@ -3,9 +3,11 @@ import json
 import logging
 import os
 import random
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from playwright.async_api import BrowserContext, Page
@@ -388,13 +390,26 @@ async def _persist_session_cookies(
         pass
 
 
-async def _attach_images(page: Page, image_urls: list[str] | None) -> list[str]:
+def _image_result(total: int, attached: int = 0, failed: list | None = None) -> dict:
+    return {"total": total, "attached": attached, "failed": failed or []}
+
+
+async def _attach_images(page: Page, image_urls: list[str] | None) -> dict:
     """Adjunta imágenes al composer abierto y espera a que la subida termine.
-    Devuelve la lista de URLs que realmente se adjuntaron (vacía si nada)."""
-    if not image_urls:
-        return []
+
+    Devuelve {"total", "attached", "failed": [{"url", "reason"}]}.
+
+    Cada imagen que no se pudo descargar se registra con su motivo. Antes este
+    fallo se silenciaba con un `continue` y devolvía una lista vacía, de modo que
+    el texto se publicaba solo y el operador no tenía ninguna señal de ello.
+    """
+    total = len(image_urls or [])
+    if not total:
+        return _image_result(0)
 
     attached: list[str] = []
+    failed: list[dict] = []
+    temp_paths: list[tuple[str, str]] = []
     try:
         dialogs = page.locator('[role="dialog"]')
         file_input = None
@@ -415,14 +430,23 @@ async def _attach_images(page: Page, image_urls: list[str] | None) -> list[str]:
                 if await page_inputs.count():
                     file_input = page_inputs.first
         if file_input is None:
-            return []
+            logger.warning("[imagen] no se halló input[type=file] en el composer")
+            return _image_result(total, 0, [{"url": u, "reason": "sin input de archivo"} for u in image_urls])
 
-        temp_paths = []
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             for url in image_urls:
                 try:
                     resp = await client.get(url, timeout=30)
                     if resp.status_code != 200:
+                        reason = f"HTTP {resp.status_code}"
+                        failed.append({"url": url, "reason": reason})
+                        logger.warning("[imagen] descarga fallida %s (%s)", url, reason)
+                        continue
+                    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                    if ctype and not ctype.startswith("image/"):
+                        reason = f"content-type {ctype or 'desconocido'}"
+                        failed.append({"url": url, "reason": reason})
+                        logger.warning("[imagen] respuesta no-imagen %s (%s)", url, reason)
                         continue
                     base = url.split("/")[-1].split("?")[0]
                     ext = os.path.splitext(base)[1] or ".jpg"
@@ -430,11 +454,13 @@ async def _attach_images(page: Page, image_urls: list[str] | None) -> list[str]:
                     tmp.write(resp.content)
                     tmp.close()
                     temp_paths.append((tmp.name, url))
-                except Exception:
+                except Exception as e:
+                    failed.append({"url": url, "reason": str(e)})
+                    logger.warning("[imagen] no se pudo descargar %s: %s", url, e)
                     continue
 
         if not temp_paths:
-            return []
+            return _image_result(total, 0, failed)
 
         await file_input.set_input_files([p for p, _ in temp_paths])
         attached = [u for _, u in temp_paths]
@@ -448,14 +474,40 @@ async def _attach_images(page: Page, image_urls: list[str] | None) -> list[str]:
                 pass
             await asyncio.sleep(0.5)
         await asyncio.sleep(1)
+
+        # El archivo puede haberse enviado y aun así fallar la subida en el
+        # navegador: si no aparece en el composer, no cuenta como adjunta.
+        try:
+            shown = await page.locator('[role="dialog"] img').count()
+        except Exception:
+            shown = len(temp_paths)
+        if shown < len(temp_paths):
+            for url in attached[shown:]:
+                failed.append({"url": url, "reason": "no apareció en el composer"})
+            logger.warning(
+                "[imagen] solo %s de %s imágenes visibles en el composer",
+                max(shown, 0),
+                len(temp_paths),
+            )
+            attached = attached[:shown]
+    except Exception as e:
+        logger.warning("[imagen] fallo adjuntando %s: %s", image_urls, e)
+        failed.append({"url": ", ".join(image_urls or []), "reason": str(e)})
+    finally:
         for p, _ in temp_paths:
             try:
                 os.unlink(p)
             except OSError:
                 pass
-    except Exception as e:
-        logger.warning("[imagen] fallo adjuntando %s", e)
-    return attached
+
+    if failed:
+        logger.warning(
+            "[imagen] %s de %s imágenes NO se adjuntaron: %s",
+            len(failed),
+            total,
+            failed,
+        )
+    return _image_result(total, len(attached), failed)
 
 
 _COMPOSER_DIALOGS = (
@@ -670,16 +722,83 @@ async def _confirm_publish(page: Page) -> dict:
 
 _MAX_GROUPS = 2000
 _SCROLL_STALL_LIMIT = 4
+# Presupuesto de tiempo por URL: el scraping es un paseo por la sesión y no
+# puede quedarse rascando indefinidamente (antes solo lo frenaba el tope de
+# scrolls, y con 3 URLs el peor caso eran varios minutos por petición).
+_SCROLL_BUDGET_SECONDS = 100.0
+
+_GROUP_ID_QUERY_KEYS = ("id", "group_id")
 
 
 def _group_id_from_href(href: str) -> str | None:
-    try:
-        parts = href.rstrip("/").split("/")
-        idx = parts.index("groups")
-        candidate = parts[idx + 1].split("?")[0]
-        return candidate if candidate.isdigit() else None
-    except (ValueError, IndexError):
+    """Extrae el id numérico de un href de grupo.
+
+    Facebook no siempre sirve `/groups/<id>/`: también usa `/groups/<slug>/`,
+    `/groups/<slug>/<id>/` y `...?id=<id>`. Exigir que el segmento fuese
+    puramente numérico descartaba en silencio todos los grupos en cuanto la
+    cuenta empezaba a ver slugs, y el síntoma era "los grupos no cargan".
+    """
+    if not href:
         return None
+    try:
+        parsed = urlparse(href)
+    except ValueError:
+        return None
+
+    # 1) query ?id= / ?group_id=
+    qs = parse_qs(parsed.query)
+    for key in _GROUP_ID_QUERY_KEYS:
+        for value in qs.get(key) or []:
+            if value.isdigit():
+                return value
+
+    segments = [s for s in parsed.path.split("/") if s]
+    if "groups" not in segments:
+        return None
+    after = segments[segments.index("groups") + 1 :]
+    if not after:
+        return None
+
+    # 2) el propio segmento ya es el id
+    if after[0].isdigit():
+        return after[0]
+
+    # 3) el id numérico viene tras el slug: /groups/mi-grupo/123456789/
+    for segment in after[1:]:
+        if segment.isdigit() and len(segment) >= 6:
+            return segment
+
+    # 4) dígitos al final del slug: /groups/mi-grupo-123456789/
+    #    Los ids de grupo de Facebook son largos; 6 dígitos evita capturar
+    #    números de página sueltos.
+    tail = re.findall(r"(\d{6,})", after[0])
+    if tail:
+        return tail[-1]
+
+    return None
+
+
+async def _scrape_health(page: Page) -> str | None:
+    """Motivo por el que la página actual no sirve, o None si todo va bien.
+
+    Sin esto, un checkpoint o una sesión caducadahacían que el scraper
+    recorriera las tres URL y las tres variantes de búsqueda para acabar
+    devolviendo cero grupos sin explicación.
+    """
+    try:
+        if "checkpoint" in page.url:
+            return (
+                "Facebook pide una verificación adicional (checkpoint). "
+                "Reimporta las cookies desde la extensión."
+            )
+        if await page.locator('input[name="email"], input[name="pass"]').count() > 0:
+            return (
+                "Facebook muestra la página de inicio de sesión: la sesión caducó. "
+                "Reimporta las cookies desde la extensión."
+            )
+    except Exception:
+        pass
+    return None
 
 
 async def _collect_group_links(page: Page, seen: dict[str, str]) -> None:
@@ -716,12 +835,18 @@ async def _scroll_to_bottom(page: Page) -> None:
     await asyncio.sleep(0.5)
 
 
-async def _scroll_all_groups(page: Page, max_scrolls: int = 90) -> dict[str, str]:
+async def _scroll_all_groups(
+    page: Page, max_scrolls: int = 90, budget_seconds: float = _SCROLL_BUDGET_SECONDS
+) -> dict[str, str]:
     """Recorre la lista de grupos haciendo scroll hasta que dejen de aparecer
-    ids nuevos (o se alcance el tope)."""
+    ids nuevos, se agote el tope de scrolls o se acabe el presupuesto de tiempo."""
     seen: dict[str, str] = {}
     stall = 0
+    started = time.monotonic()
     for _ in range(max_scrolls):
+        if time.monotonic() - started > budget_seconds:
+            logger.info("[grupos] presupuesto de %.0fs agotado con %s ids", budget_seconds, len(seen))
+            break
         before = len(seen)
         await _collect_group_links(page, seen)
         if len(seen) >= _MAX_GROUPS:
@@ -750,14 +875,26 @@ async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
                 await random_delay(2, 4)
                 await _dismiss_account_chooser(page)
                 await random_delay(1, 2)
-                found = await _scroll_all_groups(page)
-                seen = {**found, **seen}  # la primera página tiene prioridad
-                if len(seen) >= _MAX_GROUPS:
-                    break
-            except Exception:
+            except Exception as e:
+                logger.warning("[grupos] no se pudo abrir %s: %s", url, e)
                 continue
 
+            # Si la sesión no vale, no tiene sentido recorrer las demás URL:
+            # se pierden minutos para acabar en cero.
+            problem = await _scrape_health(page)
+            if problem:
+                raise Exception(problem)
+
+            found = await _scroll_all_groups(page)
+            seen = {**found, **seen}  # la primera página tiene prioridad
+            logger.info("[grupos] %s -> %s ids acumulados", url, len(found))
+            if len(seen) >= _MAX_GROUPS:
+                break
+
         if not seen:
+            problem = await _scrape_health(page)
+            if problem:
+                raise Exception(problem)
             found = await _scrape_groups_via_search(page)
             seen = {**found, **seen}
 
@@ -766,7 +903,9 @@ async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
         await _safe_close_context(context)
 
 
-async def _scrape_groups_via_search(page: Page) -> dict[str, str]:
+async def _scrape_groups_via_search(
+    page: Page, max_scrolls: int = 40, budget_seconds: float = _SCROLL_BUDGET_SECONDS
+) -> dict[str, str]:
     try:
         await _goto(page, "https://www.facebook.com/groups")
     except Exception:
@@ -775,7 +914,10 @@ async def _scrape_groups_via_search(page: Page) -> dict[str, str]:
 
     seen: dict[str, str] = {}
     stall = 0
-    for _ in range(40):
+    started = time.monotonic()
+    for _ in range(max_scrolls):
+        if time.monotonic() - started > budget_seconds:
+            break
         before = len(seen)
         try:
             cards = await page.query_selector_all('[class*="x1i10hfl"]')
@@ -817,6 +959,7 @@ async def post_to_group(
 ) -> dict:
     context = await _acquire_context(session)
     page = await context.new_page()
+    image_result = _image_result(len(image_urls or []))
     try:
         page.set_default_timeout(30000)
         await _goto(page, f"https://www.facebook.com/groups/{group_id}")
@@ -850,8 +993,7 @@ async def post_to_group(
         await textbox.fill(text)
         await random_delay(1, 2)
 
-        if image_urls:
-            await _attach_images(page, image_urls)
+        image_result = await _attach_images(page, image_urls)
 
         result = await _confirm_publish(page)
 
@@ -862,13 +1004,25 @@ async def post_to_group(
                 "status": "pending_approval",
                 "group_id": group_id,
                 "group_requires_approval": True,
+                "images_attached": image_result["attached"],
+                "images_total": image_result["total"],
                 "error": "Publicación enviada; queda pendiente la aprobación del administrador del grupo.",
             }
         logger.info("[grupo] publicado group=%s text=%r", group_id, text[:40])
-        return {"status": "success", "group_id": group_id}
+        return {
+            "status": "success",
+            "group_id": group_id,
+            "images_attached": image_result["attached"],
+            "images_total": image_result["total"],
+        }
     except Exception as e:
         await _release_failed_context(session)
-        return {"status": "failed", "error": str(e)}
+        return {
+            "status": "failed",
+            "error": str(e),
+            "images_attached": image_result["attached"],
+            "images_total": image_result["total"],
+        }
     finally:
         try:
             await page.close()
@@ -884,6 +1038,7 @@ async def post_to_profile(
 ) -> dict:
     context = await _acquire_context(session)
     page = await context.new_page()
+    image_result = _image_result(len(image_urls or []))
     try:
         page.set_default_timeout(30000)
         await _goto(page, "https://www.facebook.com/")
@@ -927,17 +1082,25 @@ async def post_to_profile(
         await textbox.fill(text)
         await random_delay(1, 2)
 
-        if image_urls:
-            await _attach_images(page, image_urls)
+        image_result = await _attach_images(page, image_urls)
 
         await _confirm_publish(page)
 
         await _persist_session_cookies(context, session, db)
         logger.info("[perfil] publicado text=%r", text[:40])
-        return {"status": "success"}
+        return {
+            "status": "success",
+            "images_attached": image_result["attached"],
+            "images_total": image_result["total"],
+        }
     except Exception as e:
         await _release_failed_context(session)
-        return {"status": "failed", "error": str(e)}
+        return {
+            "status": "failed",
+            "error": str(e),
+            "images_attached": image_result["attached"],
+            "images_total": image_result["total"],
+        }
     finally:
         try:
             await page.close()

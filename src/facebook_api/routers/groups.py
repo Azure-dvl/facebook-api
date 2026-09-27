@@ -29,7 +29,16 @@ async def get_groups(
     db: AsyncSession = Depends(get_db),
 ):
     session = await _get_session(session_id, db)
-    groups = await list_groups(session.encrypted_cookies, decrypt_data)
+    # El scraping lanza excepciones con el motivo real (sesión caducada,
+    # checkpoint de Facebook, cookies ilegibles). Sin este envoltorio FastAPI
+    # las convierte en un 500 con detalle genérico y quien llama no puede
+    # distinguir "tu sesión expiró" de "Facebook cambió el HTML".
+    try:
+        groups = await list_groups(session.encrypted_cookies, decrypt_data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
     return GroupListResponse(
         groups=[GroupInfo(id=g["id"], name=g["name"]) for g in groups]
     )
