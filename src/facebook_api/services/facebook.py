@@ -22,22 +22,56 @@ async def random_delay(min_s: float = 2.0, max_s: float = 5.0) -> None:
     await asyncio.sleep(random.uniform(min_s, max_s))
 
 
+_PLACEHOLDER_RE = re.compile(r"^(grupo|group)\s*\d+$", re.IGNORECASE)
+
+
 def clean_group_name(raw_name: str) -> str:
-    name = raw_name.strip()
+    """Nombre del grupo a partir del texto de una tarjeta o de un ancla.
+
+    Ese texto llega como "Nombre real\\n1.2 M miembros\\nActivo por última vez":
+    el nombre es siempre el primer renglón y todo lo demás es metadato. Antes se
+    guardaba el bloque entero, así que los grupos aparecían con el texto pegado
+    ("Nombre real 1.2 M miembros Activo por última vez").
+    """
+    if not raw_name:
+        return ""
+    name = raw_name.strip().split("\n", 1)[0].strip()
+    # Facebook a veces mete el metadato en la misma línea, separado por "·".
     for marker in [
-        "\nActivo",
         "Activo por última vez",
         "Activo hace",
         "Activo en los últimos",
         "Activo esta",
         "Activo hoy",
+        "· Activo",
         "Activo ",
     ]:
         idx = name.find(marker)
         if idx > 0:
             name = name[:idx]
             break
-    return name.strip()
+    # Cortar por "· Activo" deja el separador colgando: "Grupo de prueba ·".
+    return name.strip().strip("·–—|-, ").strip()
+
+
+def is_placeholder_name(name: str) -> bool:
+    """True si el nombre no salió de Facebook sino del marcador de reserva."""
+    return bool(_PLACEHOLDER_RE.match(name.strip()))
+
+
+def merge_groups(accumulated: dict[str, str], new: dict[str, str]) -> dict[str, str]:
+    """Une dos tandas de grupos sin que un marcador pise un nombre real.
+
+    El orden de las URL es deliberado (la primera manda), pero con el merge
+    simple de antes el marcador "Grupo 12345" se quedaba pegado aunque otra URL
+    más tarde hubiera leído el nombre de verdad para ese mismo grupo.
+    """
+    out = dict(accumulated)
+    for gid, name in new.items():
+        current = out.get(gid)
+        if current is None or is_placeholder_name(current):
+            out[gid] = name
+    return out
 
 
 async def _safe_close_context(context: BrowserContext) -> None:
@@ -801,6 +835,45 @@ async def _scrape_health(page: Page) -> str | None:
     return None
 
 
+async def _name_from_anchor(link) -> str:
+    """Nombre del grupo leído del ancla, probando varias fuentes.
+
+    En las listas de Facebook el ancla suele envolver solo la imagen del grupo,
+    así que `inner_text()` llega vacío y el nombre se caía al marcador con el
+    id. Se prueban texto, aria-label, title y el alt de la imagen antes de
+    rendirse; un nombre real es mucho más útil que "Grupo 123456789".
+    """
+    candidates: list[str] = []
+
+    async def grab(factory, attr: str | None = None) -> None:
+        try:
+            el = await (factory(attr) if attr is not None else factory())
+            if el is None:
+                return
+            value = el if isinstance(el, str) else (await el.get_attribute(attr) or "")
+            if value:
+                candidates.append(value)
+        except Exception:
+            pass
+
+    await grab(link.inner_text)
+    await grab(link.get_attribute, "aria-label")
+    await grab(link.get_attribute, "title")
+    try:
+        img = await link.query_selector("img")
+        if img is not None:
+            await grab(img.get_attribute, "alt")
+    except Exception:
+        pass
+
+    for raw in candidates:
+        name = clean_group_name(raw)
+        # Un ancla cuyo único texto es el id tampoco es un nombre.
+        if name and not name.isdigit():
+            return name
+    return ""
+
+
 async def _collect_group_links(page: Page, seen: dict[str, str]) -> None:
     try:
         links = await page.query_selector_all(
@@ -816,8 +889,8 @@ async def _collect_group_links(page: Page, seen: dict[str, str]) -> None:
             gid = _group_id_from_href(href)
             if not gid or gid in seen:
                 continue
-            name = await link.inner_text()
-            seen[gid] = clean_group_name(name) or f"Grupo {gid}"
+            name = await _name_from_anchor(link)
+            seen[gid] = name or f"Grupo {gid}"
         except Exception:
             continue
 
@@ -886,7 +959,7 @@ async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
                 raise Exception(problem)
 
             found = await _scroll_all_groups(page)
-            seen = {**found, **seen}  # la primera página tiene prioridad
+            seen = merge_groups(seen, found)
             logger.info("[grupos] %s -> %s ids acumulados", url, len(found))
             if len(seen) >= _MAX_GROUPS:
                 break
@@ -896,8 +969,15 @@ async def list_groups(encrypted_cookies: str, decrypt_fn) -> list[dict]:
             if problem:
                 raise Exception(problem)
             found = await _scrape_groups_via_search(page)
-            seen = {**found, **seen}
+            seen = merge_groups(seen, found)
 
+        sin_nombre = sum(1 for n in seen.values() if is_placeholder_name(n))
+        if sin_nombre:
+            logger.warning(
+                "[grupos] %s de %s grupos sin nombre real (el ancla no traía texto)",
+                sin_nombre,
+                len(seen),
+            )
         return [{"id": gid, "name": name} for gid, name in seen.items()]
     finally:
         await _safe_close_context(context)
@@ -932,8 +1012,10 @@ async def _scrape_groups_via_search(
                     gid = _group_id_from_href(href)
                     if not gid or gid in seen:
                         continue
-                    name = await card.inner_text()
-                    seen[gid] = clean_group_name(name) or f"Grupo {gid}"
+                    name = clean_group_name(await card.inner_text())
+                    if not name:
+                        name = await _name_from_anchor(link)
+                    seen[gid] = name or f"Grupo {gid}"
                 except Exception:
                     continue
         except Exception:
@@ -948,6 +1030,62 @@ async def _scrape_groups_via_search(
             stall = 0
         await _scroll_to_bottom(page)
     return seen
+
+
+#: Títulos que Facebook devuelve en la pared de login o en páginas genéricas.
+#: No son nombres de grupo, así que se descartan en vez de guardarse.
+_GENERIC_TITLES = {
+    "facebook",
+    "facebook.com",
+    "facebook — iniciar sesión",
+    "facebook - iniciar sesión",
+    "log in",
+    "iniciar sesión",
+    "inicio de sesión",
+    "facebook login",
+}
+
+
+def _is_generic_title(name: str) -> bool:
+    return name.strip().lower() in _GENERIC_TITLES
+
+
+async def get_group_name(
+    encrypted_cookies: str, decrypt_fn, group_id: str
+) -> str | None:
+    """Nombre real de un grupo, leído de su página en Facebook.
+
+    Este dato antes no se consultaba en ningún sitio: el endpoint devolvía
+    `Group <id>` constante, así que cualquier consumidor acababa guardando el
+    id como si fuera el nombre del grupo.
+    """
+    context, page = await _get_authenticated_context(encrypted_cookies, decrypt_fn)
+    try:
+        await _goto(page, f"https://www.facebook.com/groups/{group_id}")
+        await random_delay(2, 3)
+
+        problem = await _scrape_health(page)
+        if problem:
+            raise Exception(problem)
+
+        for selector in ('meta[property="og:title"]', 'meta[name="title"]'):
+            try:
+                el = await page.query_selector(selector)
+                if el:
+                    value = clean_group_name((await el.get_attribute("content")) or "")
+                    if value and not is_placeholder_name(value) and not _is_generic_title(value):
+                        return value
+            except Exception:
+                continue
+
+        # "Nombre del grupo | Facebook" -> "Nombre del grupo"
+        title = re.split(r"\s*[|·]\s*Facebook\s*$", clean_group_name(await page.title()))[0]
+        title = title.strip()
+        if title and not is_placeholder_name(title) and not _is_generic_title(title):
+            return title
+        return None
+    finally:
+        await _safe_close_context(context)
 
 
 async def post_to_group(

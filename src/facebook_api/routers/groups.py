@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from facebook_api.database import get_db
 from facebook_api.models.session import FacebookSession
 from facebook_api.schemas.group import GroupInfo, GroupListResponse
-from facebook_api.services.facebook import list_groups
+from facebook_api.services.facebook import get_group_name, list_groups
 from facebook_api.utils.crypto import decrypt_data
 
 router = APIRouter(prefix="/groups", tags=["groups"])
@@ -45,5 +45,24 @@ async def get_groups(
 
 
 @router.get("/{group_id}", response_model=GroupInfo)
-async def get_group_info(group_id: str, session_id: str = Query(...)):
-    return GroupInfo(id=group_id, name=f"Group {group_id}")
+async def get_group_info(
+    group_id: str,
+    session_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    session = await _get_session(session_id, db)
+    try:
+        name = await get_group_name(session.encrypted_cookies, decrypt_data, group_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if not name:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Facebook no devolvió un nombre legible para ese grupo. "
+                "Puede que el grupo sea privado o que el id no exista."
+            ),
+        )
+    return GroupInfo(id=group_id, name=name)
